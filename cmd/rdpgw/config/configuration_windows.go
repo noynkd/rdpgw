@@ -1,4 +1,4 @@
-//go:build unix
+//go:build windows
 
 package config
 
@@ -84,7 +84,6 @@ type Configuration struct {
 type ServerConfig struct {
 	GatewayAddress       string   `koanf:"gatewayaddress"`
 	Port                 int      `koanf:"port"`
-	BindAddress          string   `koanf:"bindaddress"`
 	CertFile             string   `koanf:"certfile"`
 	KeyFile              string   `koanf:"keyfile"`
 	Hosts                []string `koanf:"hosts"`
@@ -218,11 +217,10 @@ func Load(configFile string) Configuration {
 	k.Load(confmap.Provider(map[string]interface{}{
 		"Server.Tls":                 "auto",
 		"Server.Port":                443,
-		"Server.BindAddress":         "",
 		"Server.SessionStore":        "cookie",
 		"Server.HostSelection":       "roundrobin",
 		"Server.Authentication":      "openid",
-		"Server.AuthSocket":          "/tmp/rdpgw-auth.sock",
+		"Server.AuthSocket":          "127.0.0.1:3000",
 		"Server.BasicAuthTimeout":    5,
 		"Client.NetworkAutoDetect":   1,
 		"Client.BandwidthAutoDetect": 1,

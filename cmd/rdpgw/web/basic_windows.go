@@ -1,4 +1,4 @@
-//go:build unix
+//go:build windows
 
 package web
 
@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	protocolGrpc = "unix"
+	protocolGrpc = "tcp"
 )
 
 type BasicAuthHandler struct {

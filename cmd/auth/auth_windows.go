@@ -1,4 +1,4 @@
-//go:build unix
+//go:build windows
 
 package main
 
@@ -10,22 +10,22 @@ import (
 	"github.com/bolkedebruin/rdpgw/cmd/auth/database"
 	"github.com/bolkedebruin/rdpgw/cmd/auth/ntlm"
 	"github.com/bolkedebruin/rdpgw/shared/auth"
-	"github.com/msteinert/pam/v2"
+	// "github.com/msteinert/pam/v2"
 	"github.com/thought-machine/go-flags"
 	"google.golang.org/grpc"
 	"log"
 	"net"
 	"os"
-	"syscall"
+	// "syscall"
 )
 
 const (
-	protocol = "unix"
+	protocol = "tcp"
 )
 
 var opts struct {
 	ServiceName string `short:"n" long:"name" default:"rdpgw" description:"the PAM service name to use"`
-	SocketAddr  string `short:"s" long:"socket" default:"/tmp/rdpgw-auth.sock" description:"the location of the socket"`
+	SocketAddr  string `short:"s" long:"socket" default:"127.0.0.1:3000" description:"the location of the socket"`
 	ConfigFile  string `short:"c" long:"conf" default:"rdpgw-auth.yaml" description:"users config file for NTLM (yaml)"`
 	AllowUID    []int  `long:"allow-uid" description:"additional UIDs allowed to connect to the socket; the daemon's own UID is always allowed (repeatable)"`
 	AllowGID    []int  `long:"allow-gid" description:"GIDs allowed to connect to the socket (repeatable)"`
@@ -49,48 +49,48 @@ func NewAuthService(serviceName string, database database.Database) auth.Authent
 	return s
 }
 
-func (s *AuthServiceImpl) Authenticate(ctx context.Context, message *auth.UserPass) (*auth.AuthResponse, error) {
-	t, err := pam.StartFunc(s.serviceName, message.Username, func(s pam.Style, msg string) (string, error) {
-		switch s {
-		case pam.PromptEchoOff:
-			return message.Password, nil
-		case pam.PromptEchoOn, pam.ErrorMsg, pam.TextInfo:
-			return "", nil
-		}
-		return "", errors.New("unrecognized PAM message style")
-	})
+// func (s *AuthServiceImpl) Authenticate(ctx context.Context, message *auth.UserPass) (*auth.AuthResponse, error) {
+// 	t, err := pam.StartFunc(s.serviceName, message.Username, func(s pam.Style, msg string) (string, error) {
+// 		switch s {
+// 		case pam.PromptEchoOff:
+// 			return message.Password, nil
+// 		case pam.PromptEchoOn, pam.ErrorMsg, pam.TextInfo:
+// 			return "", nil
+// 		}
+// 		return "", errors.New("unrecognized PAM message style")
+// 	})
 
-	r := &auth.AuthResponse{}
-	r.Authenticated = false
+// 	r := &auth.AuthResponse{}
+// 	r.Authenticated = false
 
-	if err != nil {
-		log.Printf("Error authenticating user: %s due to: %s", message.Username, err)
-		r.Error = err.Error()
-		return r, err
-	}
-	defer func() {
-		err := t.End()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "end: %v\n", err)
-			os.Exit(1)
-		}
-	}()
-	if err = t.Authenticate(0); err != nil {
-		log.Printf("Authentication for user: %s failed due to: %s", message.Username, err)
-		r.Error = err.Error()
-		return r, nil
-	}
+// 	if err != nil {
+// 		log.Printf("Error authenticating user: %s due to: %s", message.Username, err)
+// 		r.Error = err.Error()
+// 		return r, err
+// 	}
+// 	defer func() {
+// 		err := t.End()
+// 		if err != nil {
+// 			fmt.Fprintf(os.Stderr, "end: %v\n", err)
+// 			os.Exit(1)
+// 		}
+// 	}()
+// 	if err = t.Authenticate(0); err != nil {
+// 		log.Printf("Authentication for user: %s failed due to: %s", message.Username, err)
+// 		r.Error = err.Error()
+// 		return r, nil
+// 	}
 
-	if err = t.AcctMgmt(0); err != nil {
-		log.Printf("Account authorization for user: %s failed due to %s", message.Username, err)
-		r.Error = err.Error()
-		return r, nil
-	}
+// 	if err = t.AcctMgmt(0); err != nil {
+// 		log.Printf("Account authorization for user: %s failed due to %s", message.Username, err)
+// 		r.Error = err.Error()
+// 		return r, nil
+// 	}
 
-	log.Printf("User: %s authenticated", message.Username)
-	r.Authenticated = true
-	return r, nil
-}
+// 	log.Printf("User: %s authenticated", message.Username)
+// 	r.Authenticated = true
+// 	return r, nil
+// }
 
 func (s *AuthServiceImpl) NTLM(ctx context.Context, message *auth.NtlmRequest) (*auth.NtlmResponse, error) {
 	r, err := s.ntlm.Authenticate(message)
@@ -131,9 +131,9 @@ func main() {
 	}
 	cleanup()
 
-	oldUmask := syscall.Umask(0117)
+	// oldUmask := syscall.Umask(0117)
 	listener, err := net.Listen(protocol, opts.SocketAddr)
-	syscall.Umask(oldUmask)
+	// syscall.Umask(oldUmask)
 	if err != nil {
 		log.Fatal(err)
 	}
