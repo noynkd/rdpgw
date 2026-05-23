@@ -1,4 +1,4 @@
-//go:build unix
+//go:build windows
 
 package main
 
@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,21 +26,62 @@ import (
 	"github.com/thought-machine/go-flags"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/oauth2"
+
+	"io"
+	"os/exec"
+	"path/filepath"
+	"time"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
 	gatewayEndPoint  = "/remoteDesktopGateway/"
 	kdcProxyEndPoint = "/KdcProxy"
+	serviceName = "rdpgw"
 )
 
 var opts struct {
 	ConfigFile string `short:"c" long:"conf" default:"rdpgw.yaml" description:"config file (yaml)"`
+	ServiceAction string `short:"s" long:"service" default:"" description:"Windows service action (install/remove)"`
 }
 
 var conf config.Configuration
 
-func listenAddress(bindAddress string, port int) string {
-	return net.JoinHostPort(bindAddress, strconv.Itoa(port))
+type winService struct{}
+
+func init() {
+	// get executable directory
+	exePath, err := os.Executable()
+	if err != nil {
+		// if we can't get the executable path, default to current directory
+		return;
+	}
+	exeDir := filepath.Dir(exePath)
+
+	// change working directory to executable directory to make relative paths work more intuitively
+	_ = os.Chdir(exeDir)
+
+	logDir := filepath.Join(exeDir, "logs")
+	logFilePath := filepath.Join(logDir, "rdpgw.log")
+
+	// create log directory if it doesn't exist and set permissions to allow writing by anyone (since service might run as different user)
+	_ = os.MkdirAll(logDir, 0777)
+	_ = exec.Command("icacls", logDir, "/grant", "*S-1-1-0:(OI)(CI)F", "/T").Run()
+
+	// setup logging to file with rotation
+	logger := &lumberjack.Logger{
+		Filename:   logFilePath,
+		MaxSize:    10, // megabytes
+		MaxBackups: 7,	// number of old log files to keep
+		MaxAge:     30, // days
+		Compress:   true,
+		LocalTime: 	true,
+	}
+
+	multiWriter := io.MultiWriter(logger, os.Stdout) // also log to stdout for easier debugging when not running as a service
+	log.SetOutput(multiWriter)
 }
 
 func initOIDC(callbackUrl *url.URL) *web.OIDC {
@@ -81,6 +121,124 @@ func main() {
 	}
 	conf = config.Load(opts.ConfigFile)
 
+	if opts.ServiceAction != "" {
+		err := handleServiceAction(opts.ServiceAction)
+		if err != nil {
+			log.Fatalf("Failed to %s service: %v", opts.ServiceAction, err)
+		}
+		return
+	}
+	
+	inService, err := svc.IsWindowsService()
+	if err != nil {
+		log.Fatalf("Failed to determine if running in service: %v", err)
+	}
+
+	if inService {
+		log.Printf("Starting Windows service %s", serviceName)
+		if err := svc.Run(serviceName, &winService{}); err != nil {
+			log.Fatalf("Windows service failed: %v", err)
+		}
+		return
+	}
+
+	if err := runApplication(context.Background()); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Application failed: %v", err)
+	}
+}
+
+func handleServiceAction(action string) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to SCM: %w", err)
+	}
+	defer m.Disconnect()
+
+	switch action {
+	case "install":
+		exePath, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("failed to get executable path: %w", err)
+		}
+
+		defaultConfigPath := filepath.Join(filepath.Dir(exePath), "rdpgw.yaml")
+
+		s, err := m.CreateService(
+			serviceName,
+			exePath,
+			mgr.Config{
+				DisplayName:    "Remote Desktop Gateway (rdpgw)",
+				Description:    "Go implementation of the Remote Desktop Gateway protocol.",
+				StartType:      mgr.StartAutomatic,
+				BinaryPathName: fmt.Sprintf(`"%s" --conf "%s"`, exePath, defaultConfigPath),
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create service: %w", err)
+		}
+		defer s.Close()
+
+		fmt.Printf("Service '%s' installed successfully.\n", serviceName)
+		return nil
+
+	case "remove":
+		s, err := m.OpenService(serviceName)
+		if err != nil {
+			return fmt.Errorf("failed to open service: %w", err)
+		}
+		defer s.Close()
+
+		err = s.Delete()
+		if err != nil {
+			return fmt.Errorf("failed to delete service: %w", err)
+		}
+
+		fmt.Printf("Service '%s' removed successfully.\n", serviceName)
+		return nil
+
+	default:
+		return fmt.Errorf("invalid service action: %s (use 'install' or 'remove')", action)
+	}
+}
+
+func (m *winService) Execute(args []string, changes <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
+	const accepted = svc.AcceptStop | svc.AcceptShutdown
+
+	status <- svc.Status{State: svc.StartPending}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errC := make(chan error, 1)
+	go func() {
+		errC <- runApplication(ctx)
+	}()
+
+	status <- svc.Status{State: svc.Running, Accepts: accepted}
+
+	func() {
+		for change := range changes {
+			switch change.Cmd {
+			case svc.Interrogate:
+				status <- change.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				status <- svc.Status{State: svc.StopPending}
+				cancel()
+				return
+			}
+		}
+	}()
+
+	var exitCode uint32 = 0
+	if err := <-errC; err != nil && err != http.ErrServerClosed {
+		log.Printf("service application failed: %v", err)
+		exitCode = 1
+	}
+
+	status <- svc.Status{State: svc.Stopped}
+	return false, exitCode
+}
+
+func runApplication(ctx context.Context) error {
 	// set callback url and external advertised gateway address
 	url, err := url.Parse(conf.Server.GatewayAddress)
 	if err != nil {
@@ -179,12 +337,13 @@ func main() {
 			certMgr := autocert.Manager{
 				Prompt:     autocert.AcceptTOS,
 				HostPolicy: autocert.HostWhitelist(url.Host),
-				Cache:      autocert.DirCache("/tmp/rdpgw"),
+				// Cache:      autocert.DirCache("/tmp/rdpgw"),
+				Cache:      autocert.DirCache(filepath.Join(os.TempDir(), "rdpgw")),
 			}
 			cfg.GetCertificate = certMgr.GetCertificate
 
 			go func() {
-				http.ListenAndServe(listenAddress(conf.Server.BindAddress, 80), certMgr.HTTPHandler(nil))
+				http.ListenAndServe(":80", certMgr.HTTPHandler(nil))
 			}()
 		}
 	}
@@ -333,18 +492,39 @@ func main() {
 
 	// setup server
 	server := http.Server{
-		Addr:         listenAddress(conf.Server.BindAddress, conf.Server.Port),
+		Addr:         ":" + strconv.Itoa(conf.Server.Port),
 		Handler:      r,
 		TLSConfig:    cfg,
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // disable http2
 	}
 
-	if conf.Server.Tls == config.TlsDisable {
-		err = server.ListenAndServe()
-	} else {
-		err = server.ListenAndServeTLS("", "")
-	}
-	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+	// if conf.Server.Tls == config.TlsDisable {
+	// 	err = server.ListenAndServe()
+	// } else {
+	// 	err = server.ListenAndServeTLS("", "")
+	// }
+	// if err != nil {
+	// 	log.Fatal("ListenAndServe: ", err)
+	// }
+	return runServer(ctx, &server)
+}
+
+func runServer(ctx context.Context, server *http.Server) error {
+	done := make(chan error, 1)
+	go func() {
+		if conf.Server.Tls == config.TlsDisable {
+			done <- server.ListenAndServe()
+			return
+		}
+		done <- server.ListenAndServeTLS("", "")
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	case err := <-done:
+		return err
 	}
 }
