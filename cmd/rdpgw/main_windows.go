@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,6 +83,10 @@ func init() {
 
 	multiWriter := io.MultiWriter(logger, os.Stdout) // also log to stdout for easier debugging when not running as a service
 	log.SetOutput(multiWriter)
+}
+
+func listenAddress(bindAddress string, port int) string {
+	return net.JoinHostPort(bindAddress, strconv.Itoa(port))
 }
 
 func initOIDC(callbackUrl *url.URL) *web.OIDC {
@@ -343,7 +348,7 @@ func runApplication(ctx context.Context) error {
 			cfg.GetCertificate = certMgr.GetCertificate
 
 			go func() {
-				http.ListenAndServe(":80", certMgr.HTTPHandler(nil))
+				http.ListenAndServe(listenAddress(conf.Server.BindAddress, 80), certMgr.HTTPHandler(nil))
 			}()
 		}
 	}
@@ -492,7 +497,7 @@ func runApplication(ctx context.Context) error {
 
 	// setup server
 	server := http.Server{
-		Addr:         ":" + strconv.Itoa(conf.Server.Port),
+		Addr:         listenAddress(conf.Server.BindAddress, conf.Server.Port),
 		Handler:      r,
 		TLSConfig:    cfg,
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // disable http2
